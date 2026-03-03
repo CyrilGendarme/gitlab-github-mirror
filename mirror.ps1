@@ -2,24 +2,27 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ─── Colors / Logging ───────────────────────────────────────────────
+# --- Logging ---------------------------------------------------------------
 function Write-Header {
-    Write-Host "`n╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║     GitLab → GitHub Mirror Tool          ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════╝`n" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "     GitLab -> GitHub Mirror Tool           " -ForegroundColor Cyan
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host ""
 }
 
 function Write-Step    ($msg) {
-    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-    Write-Host "  $msg" -ForegroundColor Cyan
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "--------------------------------------------" -ForegroundColor Cyan
+    Write-Host "  $msg"                                        -ForegroundColor Cyan
+    Write-Host "--------------------------------------------" -ForegroundColor Cyan
 }
 function Write-Info    ($msg) { Write-Host "[INFO]    $msg" -ForegroundColor Blue    }
 function Write-Success ($msg) { Write-Host "[SUCCESS] $msg" -ForegroundColor Green   }
 function Write-Warn    ($msg) { Write-Host "[WARNING] $msg" -ForegroundColor Yellow  }
 function Write-Err     ($msg) { Write-Host "[ERROR]   $msg" -ForegroundColor Red     }
 
-# ─── Load Config ────────────────────────────────────────────────────
+# --- Load Config -----------------------------------------------------------
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $ConfigFile = Join-Path $ScriptDir "config.ps1"
 
@@ -30,20 +33,32 @@ if (-not (Test-Path $ConfigFile)) {
 
 . $ConfigFile   # Dot-source the config (imports all variables)
 
-# ─── Dependency Check ───────────────────────────────────────────────
-function Test-Dependencies {
-    $deps = @("git", "curl")
-    foreach ($dep in $deps) {
-        if (-not (Get-Command $dep -ErrorAction SilentlyContinue)) {
-            Write-Err "Missing dependency: '$dep'. Please install it."
-            exit 1
-        }
+# --- Git Wrapper (suppresses stderr-as-error false positives) ---------------
+function Invoke-Git {
+    # Temporarily suspend Stop-on-error so git's stderr info messages
+    # (e.g. "Cloning into...") are not treated as terminating errors.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & git @args 2>&1 | ForEach-Object { Write-Host $_.ToString() }
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
-    # PowerShell 5.1+ has Invoke-RestMethod / ConvertFrom-Json natively — no jq needed!
+    if ($LASTEXITCODE -ne 0) {
+        throw "git exited with code $LASTEXITCODE"
+    }
+}
+
+# --- Dependency Check ------------------------------------------------------
+function Test-Dependencies {
+    if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
+        Write-Err "Missing dependency: 'git'. Please install it and ensure it is in PATH."
+        exit 1
+    }
     Write-Host "[OK] All dependencies found." -ForegroundColor Green
 }
 
-# ─── GitLab API Helper ──────────────────────────────────────────────
+# --- GitLab API Helper -----------------------------------------------------
 function Invoke-GitLabApi {
     param([string]$Endpoint)
 
@@ -59,7 +74,7 @@ function Invoke-GitLabApi {
     }
 }
 
-# ─── GitHub API Helper ──────────────────────────────────────────────
+# --- GitHub API Helper -----------------------------------------------------
 function Invoke-GitHubApi {
     param(
         [string]$Endpoint,
@@ -87,13 +102,11 @@ function Invoke-GitHubApi {
         return Invoke-RestMethod @params
     }
     catch {
-        # Return the error response instead of throwing
-        $statusCode = $_.Exception.Response.StatusCode.value__
-        return @{ error = $true; status = $statusCode; message = $_.ToString() }
+        return @{ error = $true; status = $_.Exception.Response.StatusCode.value__; message = $_.ToString() }
     }
 }
 
-# ─── Fetch All GitLab Projects ──────────────────────────────────────
+# --- Fetch All GitLab Projects ---------------------------------------------
 function Get-GitLabProjects {
     Write-Step "Fetching all GitLab projects for user: $GITLAB_USERNAME"
 
@@ -110,11 +123,8 @@ function Get-GitLabProjects {
         Write-Info "Fetched page $page ($($response.Count) projects)"
 
         foreach ($project in $response) {
-            # Filter archived
-            if (-not $MIRROR_ARCHIVED -and $project.archived -eq $true) { continue }
-
-            # Filter private
-            if (-not $MIRROR_PRIVATE -and $project.visibility -eq "private") { continue }
+            if (-not $MIRROR_ARCHIVED -and $project.archived -eq $true)      { continue }
+            if (-not $MIRROR_PRIVATE  -and $project.visibility -eq "private") { continue }
 
             $allProjects += $project
         }
@@ -127,7 +137,7 @@ function Get-GitLabProjects {
     return $allProjects
 }
 
-# ─── Check if GitHub Repo Exists ────────────────────────────────────
+# --- Check if GitHub Repo Exists -------------------------------------------
 function Test-GitHubRepo {
     param([string]$RepoName)
 
@@ -149,7 +159,7 @@ function Test-GitHubRepo {
     }
 }
 
-# ─── Create GitHub Repository ───────────────────────────────────────
+# --- Create GitHub Repository ----------------------------------------------
 function New-GitHubRepo {
     param(
         [string]$RepoName,
@@ -173,12 +183,12 @@ function New-GitHubRepo {
         return $true
     }
     else {
-        Write-Warn "Could not confirm creation of $RepoName — it may already exist or there was an issue."
+        Write-Warn "Could not confirm creation of $RepoName."
         return $false
     }
 }
 
-# ─── Mirror Single Repository ───────────────────────────────────────
+# --- Mirror Single Repository ----------------------------------------------
 function Invoke-MirrorRepository {
     param(
         [string]$GitLabUrl,
@@ -189,11 +199,8 @@ function Invoke-MirrorRepository {
 
     Write-Step "Mirroring: $RepoName"
 
-    # Inject token into GitLab clone URL
-    $authGitLabUrl  = $GitLabUrl -replace "https://", "https://oauth2:${GITLAB_TOKEN}@"
-
-    # GitHub push URL with token
-    $githubPushUrl  = "https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${RepoName}.git"
+    $authGitLabUrl = $GitLabUrl -replace "https://", "https://oauth2:${GITLAB_TOKEN}@"
+    $githubPushUrl = "https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${RepoName}.git"
 
     $repoDir = Join-Path $TEMP_DIR $RepoName
 
@@ -202,50 +209,45 @@ function Invoke-MirrorRepository {
         Remove-Item -Recurse -Force $repoDir
     }
 
-    # ── Step 1: Clone from GitLab (bare mirror) ──
+    # Step 1: Clone bare from GitLab
     Write-Info "Cloning from GitLab (bare mirror)..."
-    git clone --mirror $authGitLabUrl $repoDir 2>&1
-
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        Invoke-Git clone --mirror $authGitLabUrl $repoDir
+    } catch {
         Write-Err "Failed to clone $RepoName from GitLab. Skipping."
         return $false
     }
 
-    # ── Step 2: Create GitHub repo if it doesn't exist ──
+    # Step 2: Create GitHub repo if needed
     if (Test-GitHubRepo -RepoName $RepoName) {
         Write-Info "GitHub repo '$RepoName' already exists. Will update."
     }
     else {
         New-GitHubRepo -RepoName $RepoName -Description $Description -IsPrivate $IsPrivate
-        Start-Sleep -Seconds 1   # Give GitHub a moment
+        Start-Sleep -Seconds 1
     }
 
-    # ── Step 3: Push everything to GitHub ──
+    # Step 3: Push to GitHub
     Write-Info "Pushing to GitHub (all branches, tags, history)..."
 
     Push-Location $repoDir
     try {
-        git remote set-url origin $githubPushUrl 2>&1
-        git push --mirror 2>&1
-
-        if ($LASTEXITCODE -ne 0) {
-            Write-Err "✘ Failed to push: $RepoName"
-            return $false
-        }
-
-        Write-Success "✔ Mirrored: $RepoName"
+        Invoke-Git remote set-url origin $githubPushUrl
+        Invoke-Git push --mirror
+        Write-Success "OK Mirrored: $RepoName"
         return $true
-    }
-    finally {
+    } catch {
+        Write-Err "FAILED to push: $RepoName"
+        return $false
+    } finally {
         Pop-Location
-        # Clean up the temp clone
         if (Test-Path $repoDir) {
             Remove-Item -Recurse -Force $repoDir
         }
     }
 }
 
-# ─── Main ────────────────────────────────────────────────────────────
+# --- Main ------------------------------------------------------------------
 function Main {
     Write-Header
     Test-Dependencies
@@ -255,7 +257,6 @@ function Main {
         New-Item -ItemType Directory -Path $TEMP_DIR | Out-Null
     }
 
-    # Fetch all GitLab projects
     $projects = Get-GitLabProjects
     $total    = $projects.Count
 
@@ -266,19 +267,16 @@ function Main {
         exit 0
     }
 
-    # Stats
     $successCount = 0
     $failedCount  = 0
     $failedRepos  = @()
 
     foreach ($project in $projects) {
-        $name        = $project.path                      # Use path/slug as repo name
+        $name        = $project.path
         $httpUrl     = $project.http_url_to_repo
         $description = if ($project.description) { $project.description } else { "" }
         $visibility  = $project.visibility
-
-        # Map GitLab visibility → GitHub private flag
-        $isPrivate = ($visibility -eq "private" -or $visibility -eq "internal")
+        $isPrivate   = ($visibility -eq "private" -or $visibility -eq "internal")
 
         $result = Invoke-MirrorRepository `
             -GitLabUrl   $httpUrl `
@@ -295,15 +293,17 @@ function Main {
         }
     }
 
-    # ── Summary ──
-    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    # Summary
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Cyan
     Write-Host "  SUMMARY"                                   -ForegroundColor Cyan
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-    Write-Host "  ✔ Success: $successCount"                  -ForegroundColor Green
-    Write-Host "  ✘ Failed:  $failedCount"                   -ForegroundColor Red
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  OK  Success: $successCount"                -ForegroundColor Green
+    Write-Host "  !!  Failed:  $failedCount"                 -ForegroundColor Red
 
     if ($failedRepos.Count -gt 0) {
-        Write-Host "`n  Failed repositories:" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Failed repositories:" -ForegroundColor Red
         foreach ($r in $failedRepos) {
             Write-Host "    - $r" -ForegroundColor Red
         }
@@ -311,11 +311,10 @@ function Main {
 
     Write-Host ""
 
-    # Final cleanup
     if (Test-Path $TEMP_DIR) {
         Remove-Item -Recurse -Force $TEMP_DIR
     }
 }
 
-# ── Entry Point ──
+# Entry Point
 Main
