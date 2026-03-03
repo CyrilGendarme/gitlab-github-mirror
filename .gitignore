@@ -1,3 +1,4 @@
 config.env
+config.ps1
 /tmp/
 *.log
