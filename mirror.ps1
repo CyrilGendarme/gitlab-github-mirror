@@ -1,6 +1,7 @@
 #Requires -Version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:GitLabAuthError = $false
 
 # --- Logging ---------------------------------------------------------------
 function Write-Header {
@@ -70,8 +71,37 @@ function Invoke-GitLabApi {
     }
     catch {
         Write-Err "GitLab API call failed: $_"
+
+        # Show clearer guidance for expired/invalid tokens when available.
+        if ($_.Exception.Response) {
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $body = $reader.ReadToEnd()
+                if ($body -match 'invalid_token|expired') {
+                    $script:GitLabAuthError = $true
+                    Write-Warn "Your GitLab token appears expired/invalid. Please refresh it in config.ps1 and rerun the script."
+                }
+            } catch {
+                # Ignore parsing failures, original error is already logged.
+            }
+        }
+
+        if ($_.ToString() -match 'invalid_token|expired') {
+            $script:GitLabAuthError = $true
+        }
+
         return $null
     }
+}
+
+function Test-ObjectHasProperty {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) { return $false }
+    return ($Object.PSObject.Properties.Name -contains $Name)
 }
 
 # --- GitHub API Helper -----------------------------------------------------
@@ -118,23 +148,72 @@ function Get-GitLabProjects {
         $endpoint = "/api/v4/projects?membership=true&per_page=${perPage}&page=${page}&order_by=id&sort=asc"
         $response = Invoke-GitLabApi -Endpoint $endpoint
 
-        if (-not $response -or $response.Count -eq 0) { break }
+        if ($null -eq $response) { break }
 
-        Write-Info "Fetched page $page ($($response.Count) projects)"
+        # Some instances return an error JSON payload as a normal object.
+        if ((Test-ObjectHasProperty -Object $response -Name "error") -and
+            (Test-ObjectHasProperty -Object $response -Name "error_description")) {
+            if ("$($response.error) $($response.error_description)" -match 'invalid_token|expired') {
+                $script:GitLabAuthError = $true
+            }
+            Write-Err "GitLab API returned an authentication error: $($response.error_description)"
+            Write-Warn "Update GITLAB_TOKEN in config.ps1, then rerun mirror.ps1."
+            break
+        }
 
-        foreach ($project in $response) {
+        $pageProjects = @($response)
+
+        if ($pageProjects.Count -eq 0) { break }
+        if (-not (Test-ObjectHasProperty -Object $pageProjects[0] -Name "http_url_to_repo")) {
+            Write-Err "GitLab API returned an unexpected payload. Stopping project fetch."
+            break
+        }
+
+        Write-Info "Fetched page $page ($($pageProjects.Count) projects)"
+
+        foreach ($project in $pageProjects) {
             if (-not $MIRROR_ARCHIVED -and $project.archived -eq $true)      { continue }
             if (-not $MIRROR_PRIVATE  -and $project.visibility -eq "private") { continue }
 
             $allProjects += $project
         }
 
-        if ($response.Count -lt $perPage) { break }
+        if ($pageProjects.Count -lt $perPage) { break }
         $page++
 
     } while ($true)
 
     return $allProjects
+}
+
+function Test-GitLabProjectHasRecentCommit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Project,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SinceDate
+    )
+
+    if (-not (Test-ObjectHasProperty -Object $Project -Name "id")) {
+        return $false
+    }
+
+    $projectId = [System.Uri]::EscapeDataString([string]$Project.id)
+    $encodedSince = [System.Uri]::EscapeDataString($SinceDate)
+    $endpoint = "/api/v4/projects/$projectId/repository/commits?since=$encodedSince&per_page=1"
+    $commitResponse = Invoke-GitLabApi -Endpoint $endpoint
+
+    if ($null -eq $commitResponse) {
+        return $false
+    }
+
+    $commits = @($commitResponse)
+    if ($commits.Count -eq 0) {
+        return $false
+    }
+
+    return (Test-ObjectHasProperty -Object $commits[0] -Name "id")
 }
 
 # --- Check if GitHub Repo Exists -------------------------------------------
@@ -151,6 +230,7 @@ function Test-GitHubRepo {
             -Uri "https://api.github.com/repos/$GITHUB_USERNAME/$RepoName" `
             -Headers $headers `
             -Method Get `
+            -UseBasicParsing `
             -ErrorAction Stop
         return ($response.StatusCode -eq 200)
     }
@@ -257,8 +337,31 @@ function Main {
         New-Item -ItemType Directory -Path $TEMP_DIR | Out-Null
     }
 
-    $projects = Get-GitLabProjects
+    $projects = @(Get-GitLabProjects)
+
+    if ($script:GitLabAuthError) {
+        Write-Err "Stopping mirror: GitLab authentication failed. Update GITLAB_TOKEN in config.ps1, then rerun."
+        return
+    }
+
     $total    = $projects.Count
+
+    if (-not [string]::IsNullOrWhiteSpace($MIRROR_SINCE_DATE)) {
+        try {
+            [DateTimeOffset]::Parse($MIRROR_SINCE_DATE) | Out-Null
+        } catch {
+            Write-Err "Invalid MIRROR_SINCE_DATE format in config.ps1. Use ISO-8601, e.g. 2026-01-01T00:00:00Z"
+            return
+        }
+
+        Write-Step "Filtering projects with at least one commit since: $MIRROR_SINCE_DATE"
+        $projects = @(
+            $projects | Where-Object {
+                Test-GitLabProjectHasRecentCommit -Project $_ -SinceDate $MIRROR_SINCE_DATE
+            }
+        )
+        $total = $projects.Count
+    }
 
     Write-Info "Found $total project(s) to mirror."
 

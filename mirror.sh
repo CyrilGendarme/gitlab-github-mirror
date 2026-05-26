@@ -90,6 +90,19 @@ fetch_gitlab_projects() {
   printf '%s\n' "${projects[@]}" | jq -s 'add // []'
 }
 
+project_has_recent_commit() {
+  local project_id="$1"
+  local encoded_since
+  encoded_since=$(printf '%s' "$MIRROR_SINCE_DATE" | jq -sRr @uri)
+
+  local response
+  response=$(curl --silent --fail \
+    --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+    "${GITLAB_URL}/api/v4/projects/${project_id}/repository/commits?since=${encoded_since}&per_page=1") || return 1
+
+  [[ "$(echo "$response" | jq 'length')" -gt 0 ]]
+}
+
 # ─── Check if GitHub Repo Exists ────────────────────────────────────
 github_repo_exists() {
   local repo_name="$1"
@@ -200,6 +213,28 @@ main() {
 
   local total
   total=$(echo "$projects" | jq 'length')
+
+  if [[ -n "${MIRROR_SINCE_DATE:-}" ]]; then
+    if ! jq -nr --arg d "$MIRROR_SINCE_DATE" '$d | fromdateiso8601' >/dev/null 2>&1; then
+      log_error "Invalid MIRROR_SINCE_DATE format in config.env. Use ISO-8601, e.g. 2026-01-01T00:00:00Z"
+      exit 1
+    fi
+
+    log_step "Filtering projects with at least one commit since: $MIRROR_SINCE_DATE"
+    local filtered_projects="[]"
+
+    while IFS= read -r project; do
+      local project_id
+      project_id=$(echo "$project" | jq -r '.id')
+      if project_has_recent_commit "$project_id"; then
+        filtered_projects=$(jq -c --argjson item "$project" '. + [$item]' <<< "$filtered_projects")
+      fi
+    done < <(echo "$projects" | jq -c '.[]')
+
+    projects="$filtered_projects"
+    total=$(echo "$projects" | jq 'length')
+  fi
+
   log_info "Found $total project(s) to mirror."
 
   if [[ "$total" -eq 0 ]]; then

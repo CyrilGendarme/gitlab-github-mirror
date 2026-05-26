@@ -94,6 +94,7 @@ Run the script again anytime — it will **update** existing GitHub repos with n
 |----------|---------|-------------|
 | `MIRROR_PRIVATE` | `true` | Mirror private GitLab repos |
 | `MIRROR_ARCHIVED` | `false` | Mirror archived repos |
+| `MIRROR_SINCE_DATE` | `""` | Mirror only repos with at least one commit after this ISO-8601 UTC date |
 | `TEMP_DIR` | `/tmp/gitlab-mirror` | Temp clone directory |
 
 > 🔒 **Security:** Both `config.env` and `powershell/config.ps1` are in `.gitignore` — your tokens will never be committed.
