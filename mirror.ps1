@@ -26,6 +26,7 @@ function Write-Err     ($msg) { Write-Host "[ERROR]   $msg" -ForegroundColor Red
 # --- Load Config -----------------------------------------------------------
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $ConfigFile = Join-Path $ScriptDir "config.ps1"
+$LastSuccessFile = Join-Path $ScriptDir ".last_mirror_success_date"
 
 if (-not (Test-Path $ConfigFile)) {
     Write-Err "config.ps1 not found. Please create it with your credentials."
@@ -33,6 +34,36 @@ if (-not (Test-Path $ConfigFile)) {
 }
 
 . $ConfigFile   # Dot-source the config (imports all variables)
+
+# --- Last Successful Run Date ----------------------------------------------
+function Get-LastSuccessMirrorDate {
+    param([string]$FilePath)
+
+    if (-not (Test-Path $FilePath)) {
+        return $null
+    }
+
+    $rawDate = (Get-Content -Path $FilePath -TotalCount 1).Trim()
+    if ([string]::IsNullOrWhiteSpace($rawDate)) {
+        return $null
+    }
+
+    try {
+        [DateTimeOffset]::Parse($rawDate) | Out-Null
+        return $rawDate
+    } catch {
+        Write-Warn "Ignoring invalid date in ${FilePath}: $rawDate"
+        return $null
+    }
+}
+
+function Save-LastSuccessMirrorDate {
+    param([string]$FilePath)
+
+    $nowUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    Set-Content -Path $FilePath -Value $nowUtc -Encoding ASCII
+    Write-Success "Saved last successful run date: $nowUtc"
+}
 
 # --- Git Wrapper (suppresses stderr-as-error false positives) ---------------
 function Invoke-Git {
@@ -332,6 +363,13 @@ function Main {
     Write-Header
     Test-Dependencies
 
+    # If available, local success state overrides config date.
+    $lastSuccessDate = Get-LastSuccessMirrorDate -FilePath $LastSuccessFile
+    if (-not [string]::IsNullOrWhiteSpace($lastSuccessDate)) {
+        $MIRROR_SINCE_DATE = $lastSuccessDate
+        Write-Info "Using last successful run date from local file: $MIRROR_SINCE_DATE"
+    }
+
     # Ensure temp directory exists
     if (-not (Test-Path $TEMP_DIR)) {
         New-Item -ItemType Directory -Path $TEMP_DIR | Out-Null
@@ -410,6 +448,13 @@ function Main {
         foreach ($r in $failedRepos) {
             Write-Host "    - $r" -ForegroundColor Red
         }
+    }
+
+    if ($failedCount -eq 0) {
+        Save-LastSuccessMirrorDate -FilePath $LastSuccessFile
+    }
+    else {
+        Write-Warn "Some repositories failed. Last successful run date not updated."
     }
 
     Write-Host ""

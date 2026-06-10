@@ -12,6 +12,7 @@ NC='\033[0m' # No Color
 # ─── Load Config ────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.env"
+LAST_SUCCESS_FILE="${SCRIPT_DIR}/.last_mirror_success_date"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo -e "${RED}[ERROR]${NC} config.env not found. Copy config.env and fill in your credentials."
@@ -38,6 +39,34 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC}   $*"; }
 log_step()    { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+
+# ─── Last Successful Run Date ───────────────────────────────────────
+load_last_success_date() {
+  if [[ ! -f "$LAST_SUCCESS_FILE" ]]; then
+    return
+  fi
+
+  local last_saved_date
+  last_saved_date="$(tr -d '[:space:]' < "$LAST_SUCCESS_FILE")"
+
+  if [[ -z "$last_saved_date" ]]; then
+    return
+  fi
+
+  if jq -nr --arg d "$last_saved_date" '$d | fromdateiso8601' >/dev/null 2>&1; then
+    MIRROR_SINCE_DATE="$last_saved_date"
+    log_info "Using last successful run date from local file: $MIRROR_SINCE_DATE"
+  else
+    log_warning "Ignoring invalid date in $LAST_SUCCESS_FILE: $last_saved_date"
+  fi
+}
+
+save_last_success_date() {
+  local now_utc
+  now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  printf '%s\n' "$now_utc" > "$LAST_SUCCESS_FILE"
+  log_success "Saved last successful run date: $now_utc"
+}
 
 # ─── Fetch All GitLab Projects ──────────────────────────────────────
 fetch_gitlab_projects() {
@@ -205,6 +234,9 @@ main() {
 
   check_dependencies
 
+  # If available, local success state overrides config date.
+  load_last_success_date
+
   mkdir -p "$TEMP_DIR"
 
   # Fetch all projects from GitLab
@@ -284,6 +316,12 @@ main() {
     for r in "${failed_repos[@]}"; do
       echo -e "    - $r"
     done
+  fi
+
+  if [[ "$failed" -eq 0 ]]; then
+    save_last_success_date
+  else
+    log_warning "Some repositories failed. Last successful run date not updated."
   fi
 
   echo ""

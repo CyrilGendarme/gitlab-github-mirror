@@ -1,4 +1,5 @@
 config.env
 config.ps1
+.last_mirror_success_date
 /tmp/
 *.log

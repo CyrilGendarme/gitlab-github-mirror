@@ -94,7 +94,13 @@ Run the script again anytime — it will **update** existing GitHub repos with n
 |----------|---------|-------------|
 | `MIRROR_PRIVATE` | `true` | Mirror private GitLab repos |
 | `MIRROR_ARCHIVED` | `false` | Mirror archived repos |
-| `MIRROR_SINCE_DATE` | `""` | Mirror only repos with at least one commit after this ISO-8601 UTC date |
+| `MIRROR_SINCE_DATE` | `""` | Initial fallback date only. If `.last_mirror_success_date` exists, scripts use that value instead |
 | `TEMP_DIR` | `/tmp/gitlab-mirror` | Temp clone directory |
+
+## Last Successful Run Date
+
+After a fully successful run (no failed repositories), scripts save the current UTC date to `.last_mirror_success_date` in the project root.
+On the next run, that date is used automatically as `MIRROR_SINCE_DATE`.
+If a run has failures, the file is not updated.
 
 > 🔒 **Security:** Both `config.env` and `powershell/config.ps1` are in `.gitignore` — your tokens will never be committed.
